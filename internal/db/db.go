@@ -486,7 +486,9 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // Existing rows need re-parsing to receive both.)
 // (106: Claude and Codex assistant messages now persist reasoning effort.
 // Existing rows need re-parsing so the field is populated.)
-const dataVersion = 106
+// (107: Canonical message timestamps. Re-parse live sessions and blank unsupported
+// timestamps in orphaned and trashed sessions before strict Bun reads.)
+const dataVersion = 107
 
 const tokenCoverageRepairStatsKey = "token_coverage_repair_v1"
 
