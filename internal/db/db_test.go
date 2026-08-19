@@ -1127,6 +1127,11 @@ func TestCurrentDataVersionReasoningEffort(t *testing.T) {
 		"reasoning effort persistence requires re-parsing unchanged transcripts")
 }
 
+func TestCurrentDataVersionCanonicalTimestamps(t *testing.T) {
+	assert.GreaterOrEqual(t, 107, CurrentDataVersion(),
+		"canonical timestamp repair requires a sequential backfill")
+}
+
 func TestInsertMessages_PreservesToolResultEvents(t *testing.T) {
 	d := testDB(t)
 	insertSession(t, d, "s-events", "proj")
