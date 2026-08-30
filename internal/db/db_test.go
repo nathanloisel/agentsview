@@ -1113,7 +1113,7 @@ func TestCurrentDataVersionAntigravityCLIExperimentalServingVariant(t *testing.T
 }
 
 func TestCurrentDataVersionCodexGuardianLineage(t *testing.T) {
-	assert.GreaterOrEqual(t, CurrentDataVersion(), 100,
+	assert.GreaterOrEqual(t, CurrentDataVersion(), 107,
 		"version 100 is the data-version boundary for Codex guardian lineage")
 }
 
@@ -1128,7 +1128,7 @@ func TestCurrentDataVersionReasoningEffort(t *testing.T) {
 }
 
 func TestCurrentDataVersionCanonicalTimestamps(t *testing.T) {
-	assert.GreaterOrEqual(t, 107, CurrentDataVersion(),
+	assert.GreaterOrEqual(t, CurrentDataVersion(), 107,
 		"canonical timestamp repair requires a sequential backfill")
 }
 
