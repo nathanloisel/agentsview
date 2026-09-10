@@ -140,7 +140,7 @@ func (db *DB) WriteSessionBatchContext(
 	defer conn.Close()
 	var staged StagedToolResults
 	for _, write := range writes {
-		if write.Staged != nil {
+		if write.Staged != nil && !db.ArchiveContent().OmitsToolContent() {
 			if staged != nil {
 				return result, fmt.Errorf("batch contains multiple staging databases")
 			}
@@ -173,17 +173,10 @@ func (db *DB) WriteSessionBatchContext(
 		if err != nil {
 			return result, err
 		}
-		write.Messages, _ = db.ProjectToolResultImages(write.Messages)
-		if db.ArchiveContent().OmitsToolContent() {
-			write.Checkpoint, write.CheckpointBlobs = nil, nil
-		}
-		write.Session, write.Messages = db.sessionAndMessagesForStorage(
-			write.Session, write.Messages,
-		)
-		if db.usageOnlyStorage() {
-			write.Signals = usageOnlySignalUpdate()
-			write.Findings = nil
-			write.SkipSignalUpdates = false
+		write, err = db.projectSessionBatchWrite(write)
+		if err != nil {
+			sanitization.release()
+			return result, err
 		}
 
 		var sessionRecallRevocations recallEvidenceRevocationEvents
@@ -274,7 +267,7 @@ func (db *DB) writeArchiveSessionBatchAtomic(
 	defer conn.Close()
 	var staged StagedToolResults
 	for _, write := range writes {
-		if write.Staged != nil {
+		if write.Staged != nil && !db.ArchiveContent().OmitsToolContent() {
 			if staged != nil {
 				return result, fmt.Errorf("atomic batch contains multiple staging databases")
 			}
@@ -297,17 +290,10 @@ func (db *DB) writeArchiveSessionBatchAtomic(
 
 	for i, write := range writes {
 		write, sanitization := sanitizeSessionBatchWrite(write)
-		write.Messages, _ = db.ProjectToolResultImages(write.Messages)
-		if db.ArchiveContent().OmitsToolContent() {
-			write.Checkpoint, write.CheckpointBlobs = nil, nil
-		}
-		write.Session, write.Messages = db.sessionAndMessagesForStorage(
-			write.Session, write.Messages,
-		)
-		if db.usageOnlyStorage() {
-			write.Signals = usageOnlySignalUpdate()
-			write.Findings = nil
-			write.SkipSignalUpdates = false
+		write, err = db.projectSessionBatchWrite(write)
+		if err != nil {
+			sanitization.release()
+			return result, err
 		}
 		messagesWritten, err := writeOneSessionBatchTx(
 			ctx, tx,
@@ -861,4 +847,28 @@ func messagesAfterOrdinal(msgs []Message, maxOrd int) []Message {
 		}
 	}
 	return nil
+}
+
+// projectSessionBatchWrite applies the archive policy before publishing any
+// staged tool payloads or continuation state into the archive.
+func (db *DB) projectSessionBatchWrite(write SessionBatchWrite) (SessionBatchWrite, error) {
+	write.Messages, _ = db.ProjectToolResultImages(write.Messages)
+	if db.ArchiveContent().OmitsToolContent() {
+		if write.StagedSignals != nil {
+			var err error
+			write.Signals, write.Findings, err = write.StagedSignals(nil)
+			if err != nil {
+				return SessionBatchWrite{}, err
+			}
+		}
+		write.Staged, write.StagedSignals = nil, nil
+		write.Checkpoint, write.CheckpointBlobs = nil, nil
+	}
+	write.Session, write.Messages = db.sessionAndMessagesForStorage(write.Session, write.Messages)
+	if db.usageOnlyStorage() {
+		write.Signals = usageOnlySignalUpdate()
+		write.Findings = nil
+		write.SkipSignalUpdates = false
+	}
+	return write, nil
 }
