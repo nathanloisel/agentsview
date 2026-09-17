@@ -325,6 +325,11 @@ add an archived or maintained mirror without replacing the original identity.
   skill names from recorded paths without consulting worker-local `SKILL.md`
   frontmatter or the local parse cache; local parsing retains frontmatter
   lookup. `TestHostedSkillInferenceKeepsNamesLexical` covers this boundary.
+  Reverified 2026-08-22 against local sessions launched from repository-local
+  `REPO/.claude/worktrees/<generated-name>` worktrees: the transcript retains
+  the generated worktree path after that checkout is deleted, so Agentsview
+  recognizes the anchored layout and attributes it to `REPO`. Evidence remains
+  `no-public-source`.
 
 ## OpenClaude (`openclaude`)
 
@@ -789,7 +794,9 @@ add an archived or maintained mirror without replacing the original identity.
 - **Format:** Workspace-scoped session directories containing `summary.json`, a
   derived `chat_history.jsonl` model-message cache, and an authoritative
   `updates.jsonl` stream of timestamped ACP and xAI session notifications.
+
 - **Evidence:** `source`.
+
 - **Upstream:** Clone `https://github.com/xai-org/grok-build.git` at
   `d71f6e0c1f5acc5469e503e192fe14824e6f8c90`. The
   [session guide](https://github.com/xai-org/grok-build/blob/d71f6e0c1f5acc5469e503e192fe14824e6f8c90/crates/codegen/xai-grok-pager/docs/user-guide/17-sessions.md)
@@ -803,12 +810,14 @@ add an archived or maintained mirror without replacing the original identity.
   Agentsview maps timestamped `tool_call` and terminal `tool_call_update`
   records to the existing tool-result event model, so Activity can use tool
   completion time without adding derived transcript messages.
+
 - **Usage and cost:** Durable `turn_completed` updates may carry per-model
   input, output, cache-read, cache-creation, and reasoning tokens plus
   optional `costUsdTicks` (10^10 ticks per USD), as defined by the
   [notification schema](https://github.com/xai-org/grok-build/blob/d71f6e0c1f5acc5469e503e192fe14824e6f8c90/crates/codegen/xai-grok-shell/src/extensions/notification.rs).
   Agentsview emits one usage event per prompt and model, subtracts cache
   reads from the full input count, and uses reported cost ticks when present.
+
 - **Automation:** The first-party
   [headless guide](https://github.com/xai-org/grok-build/blob/d92c5b0b8582fda358de1f97446aa74af44a464f/crates/codegen/xai-grok-pager/docs/user-guide/14-headless-mode.md)
   defines prompt flags as non-interactive invocation. The producer
@@ -826,6 +835,7 @@ add an archived or maintained mirror without replacing the original identity.
   supplies it. Agentsview treats only an explicit true value in a valid,
   session-associated file as durable automation evidence; file presence, a
   missing field, or a missing file does not classify a session as automated.
+
 - **Agentsview:** `internal/parser/grok.go`, `internal/parser/grok_provider.go`,
   colocated tests, and the sanitized upstream-generated fixtures in
   `internal/parser/testdata/grok-build`.
@@ -1244,6 +1254,19 @@ preservation of archived messages for OpenCode, Kilo, MiMoCode, and Icodemate.
   Kilo migrations mean the pinned current source must be compared with legacy
   fixtures when changing compatibility.
 
+**Projection ordering check (2026-09-14):** The
+[released reader](https://github.com/Kilo-Org/kilocode/blob/2266489ef8b5a0dba701bf335c7fa6406a72f6cd/packages/opencode/src/v2/session.ts)
+orders `session_message` rows by `time_created`, then `id`. The pinned
+[projection-order migration](https://github.com/Kilo-Org/kilocode/blob/938919ab72e3977d1512e0363417270e3337c7b1/packages/core/migration/20260603040000_session_message_projection_order/migration.sql)
+adds `seq` to that existing table. A `data` column alone therefore does not
+identify the sequenced format. Discovery and parsing inspect the ordering
+column, retain populated projections without `seq`, and still import unmatched
+legacy message/part rows when the projection table is empty or partially used.
+Projection fingerprints include the applicable ordering column. The regression
+`TestKiloSQLiteProjectionWithoutSequence` covers discovery, message ordering,
+legacy message retention, and detection of reordered projections. Sequenced
+schemas keep their existing ordering behavior.
+
 ## Kilo (legacy) (`kilo-legacy`)
 
 - **Format:** Pre-OpenCode Kilo VSCode extension (`kilocode.kilo-code`) task
@@ -1289,6 +1312,43 @@ preservation of archived messages for OpenCode, Kilo, MiMoCode, and Icodemate.
 - **Agentsview:** `internal/parser/roocode.go` and
   `internal/parser/roocode_provider.go`; observed older Roo/Cline message
   variants remain covered by the parser's colocated fixtures.
+
+## Cline CLI (`cline`)
+
+- **Format:** One session directory per task under
+  `~/.cline/data/sessions/<id>/` containing `<id>.json` (session metadata and
+  aggregate usage) and `<id>.messages.json` (transcript array with text,
+  thinking, tool_use, and tool_result blocks).
+- **Evidence:** `source`.
+- **Upstream:** Clone `https://github.com/cline/cline.git` at
+  `595f1dbf2ea819e987afeadb4ed4dd9a0ae9a55e`. The pinned
+  [session persistence](https://github.com/cline/cline/blob/595f1dbf2ea819e987afeadb4ed4dd9a0ae9a55e/sdk/packages/core/src/session/services/persistence-service.ts)
+  and
+  [conversation store](https://github.com/cline/cline/blob/595f1dbf2ea819e987afeadb4ed4dd9a0ae9a55e/sdk/packages/core/src/session/stores/conversation-store.ts)
+  persist metadata to `<sessionId>/<sessionId>.json` and structured messages
+  to `<sessionId>/<sessionId>.messages.json`.
+- **Usage and cost:** `<id>.json` persists cumulative `inputTokens`,
+  `outputTokens`, `cacheReadTokens`, and `cacheWriteTokens` along with
+  `totalCost` in the `metadata.usage` / `metadata.aggregateUsage` object.
+  Individual assistant messages also carry per-turn `metrics` (input, output,
+  cache read/write tokens). Agentsview consumes the reported cost, including
+  explicit zero, and tracks the peak context window across turns.
+- **Agentsview:** `internal/parser/cline.go` and
+  `internal/parser/cline_provider.go`. User input in `<id>.messages.json` is
+  wrapped in `<user_input mode="...">` envelopes and can contain internal
+  `<mode_notice>` blocks upon mode switching. Agentsview strips these wrapper
+  and notice tags across all turns so operator prompts and session names
+  remain clean human text and empty approvals do not persist empty bubbles.
+  Teammate transcripts live in
+  `<sessionDir>/<subagent>__<taskSuffix>.messages.json`, one file per
+  `team_run_task` run. Each file becomes one subagent session whose ID is the
+  `sessionId` Cline writes into the payload
+  (`<parent>__teamtask__<subagent>__<nonce>`), linked to the parent through
+  `origin.parentThreadId`. A continued run writes a new file that repeats the
+  earlier messages; both files stay separate sessions, matching Cline's own
+  session store. A `team_run_task` call is linked to its teammate session only
+  when that subagent has a single transcript. Deleted teammate transcripts are
+  tombstoned through complete-source ownership reconciliation.
 
 ## OpenHands (`openhands`)
 
@@ -1678,7 +1738,23 @@ preservation of archived messages for OpenCode, Kilo, MiMoCode, and Icodemate.
   conversation. Reverified 2026-09-03 against 156 local Pi transcripts: the
   parser attributed 1,316 `read` calls whose `path` or `file_path` named a
   concrete `SKILL.md`, while shell commands that only mentioned the filename
-  without reading it stayed unattributed.
+  without reading it stayed unattributed. Reverified 2026-09-14 against the
+  pinned
+  [session format](https://github.com/earendil-works/pi/blob/f1c587dde39025c75d7397bc14532d8fa5c001d9/packages/coding-agent/docs/session-format.md)
+  and
+  [session manager](https://github.com/earendil-works/pi/blob/f1c587dde39025c75d7397bc14532d8fa5c001d9/packages/coding-agent/src/core/session-manager.ts):
+  native Pi persists the parent of `/fork`, `/clone`, and
+  `newSession({ parentSession })` sessions as a `parentSession` file path to
+  the parent transcript, whose header UUID is authoritative even where the
+  filename stem diverges (explicit `--session` paths skip the default
+  `timestamp_session-id` naming). Agentsview resolves that path against the
+  referenced sibling's header UUID, falls back to the filename stem when the
+  referenced file is unavailable, and classifies native Pi sessions with a
+  parent as forks. Because the default filename does not contain the header
+  UUID, identity lookup that arrives with only a bare header UUID and no
+  stored path or fingerprint hint scans discovered session headers after the
+  filename and directory lookups miss. Data version 109 reparses stored
+  native Pi sessions to repair lineage edges and fork classification.
 
 ## Prime Agent (`prime-agent`)
 
@@ -1827,7 +1903,7 @@ preservation of archived messages for OpenCode, Kilo, MiMoCode, and Icodemate.
 - **Evidence:** `source`.
 
 - **Upstream:** Clone `https://github.com/deepseek-ai/deepseek-harness.git` at
-  `56c4c3e47c195ff5edbfe3d307bdef81f3de348b` (reverified 2026-09-11). The
+  `56c4c3e47c195ff5edbfe3d307bdef81f3de348b` (reverified 2026-09-14). The
   [frozen version-0 codec](https://github.com/deepseek-ai/deepseek-harness/blob/56c4c3e47c195ff5edbfe3d307bdef81f3de348b/packages/session/session-format-v0-to-v1/src/codec.ts),
 
     [released event inventory](https://github.com/deepseek-ai/deepseek-harness/blob/56c4c3e47c195ff5edbfe3d307bdef81f3de348b/packages/session/session-format-v0-to-v1/src/dispositions.ts),
@@ -2990,6 +3066,64 @@ preservation of archived messages for OpenCode, Kilo, MiMoCode, and Icodemate.
   default sessions from distinct configured roots separate; it does not
   distinguish machines with identical root paths. No legacy Tau v1 conversion,
   native transfer, or index metadata synchronization is included.
+
+## Charm Crush (`crush`)
+
+- **Format:** One SQLite `crush.db` per project under the project's `.crush`
+  data directory (configurable with `options.data_directory` or `--data-dir`).
+  Session metadata, cumulative token totals, and cost live in `sessions`;
+  ordered role messages with a JSON `parts` array (`text`, `reasoning`,
+  `tool_call`, `tool_result`, `finish`) live in `messages`. A project registry
+  at the global data directory maps project paths to data directories.
+
+- **Evidence:** `source`.
+
+- **Upstream:** Clone `https://github.com/charmbracelet/crush.git` at
+  `ce980ada68444b7591d8dfa631af7e94b2aba0b3`; see the pinned
+  [initial schema](https://github.com/charmbracelet/crush/blob/ce980ada68444b7591d8dfa631af7e94b2aba0b3/internal/db/migrations/20250424200609_initial.sql),
+
+    [project registry](https://github.com/charmbracelet/crush/blob/ce980ada68444b7591d8dfa631af7e94b2aba0b3/internal/projects/projects.go),
+    and
+    [data-directory resolution](https://github.com/charmbracelet/crush/blob/ce980ada68444b7591d8dfa631af7e94b2aba0b3/internal/config/load.go).
+    The registry is `projects.json` next to the global config file:
+    `~/.local/share/crush/projects.json` (or `$XDG_DATA_HOME/crush/`,
+    `$CRUSH_GLOBAL_DATA/`) on macOS and Linux and
+    `%LOCALAPPDATA%\crush\projects.json` on Windows. Timestamps are Unix seconds
+    despite older schema comments claiming milliseconds; the `updated_at`
+    triggers write `strftime('%s','now')`. Later migrations add
+    `summary_message_id`, `todos`, `provider`, `is_summary_message`,
+    `read_files`, and Prism/Hyper metadata columns. The schema was reverified
+    against a live 2026-09 Crush store on 2026-09-11.
+
+- **Usage and cost:** `sessions.prompt_tokens` and `sessions.completion_tokens`
+  are cumulative session totals and `sessions.cost` is a recorded provider
+  cost, with no per-request breakdown and no per-message token fields.
+  Agentsview emits exactly one aggregate `session` usage event per session,
+  tagged with the most recent assistant message's model, and reports no
+  per-message token data.
+
+- **Agentsview:** `internal/parser/crush.go` and
+  `internal/parser/crush_provider.go` require the `messages.parts` column as
+  the format marker (the `goose_db_version` table belongs to Crush's vendored
+  goose migration tool and proves nothing), expand `projects.json` entries
+  into provider roots, attribute each session to the project directory above
+  the store, pair `tool_result` parts into system tool-result messages keyed
+  by call ID, emit `is_summary_message` rows as compact-boundary system
+  messages, and fingerprint the session and message rows so same-second edits
+  still invalidate freshness (`FingerprintHashRequiredForFreshness`). Watcher
+  events use bounded rowid cursors over `sessions` and `messages` so work
+  stays proportional to inserted rows, with a periodic reconciliation pass
+  covering metadata-only edits. Raw-sync audits re-read the project registry,
+  and raw snapshots carry the registry-derived project path in the database's
+  logical manifest path because the database does not store it. Source row
+  deletion is not authoritative. Crush's pinned
+  [session deletion service](https://github.com/charmbracelet/crush/blob/ce980ada68444b7591d8dfa631af7e94b2aba0b3/internal/session/session.go#L138-L168)
+  physically removes session messages, files, and the session row
+  (reverified 2026-09-16). Raw derivation requests full content replacement
+  for emitted sessions separately from membership replacement, including when
+  the next snapshot is empty. Archived sessions remain active until the user
+  deletes them in AgentsView. A malformed `parts` value fails that session's
+  parse rather than degrading silently, matching the goose parser's policy.
 
 [evener-source-1]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/agent/transcript/transcript.go
 [evener-source-2]: https://github.com/prime-radiant-inc/evener/blob/da7c06396c9848abfae362dcffce3861a6a0c95a/agent/schema/turn.go

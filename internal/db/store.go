@@ -34,6 +34,9 @@ type Store interface {
 	GetSessionFull(ctx context.Context, id string) (*Session, error)
 	// FindSessionIDsByPartial uses literal, case-sensitive substring matching.
 	FindSessionIDsByPartial(ctx context.Context, partial string, limit int) ([]string, error)
+	// FindSessionIDsByRawSuffix matches an exact stored ID or a literal
+	// colon/tilde-delimited suffix before applying limit.
+	FindSessionIDsByRawSuffix(ctx context.Context, raw string, limit int) ([]string, error)
 	GetChildSessions(ctx context.Context, parentID string) ([]Session, error)
 
 	// Messages.
@@ -71,7 +74,7 @@ type Store interface {
 	BuildProjectIdentityMap(ctx context.Context, labels []string) (map[string]export.ProjectMapEntry, error)
 
 	// Data (archive inventory).
-	GetProjectInventory(ctx context.Context) (ProjectInventory, error)
+	GetProjectInventory(ctx context.Context, filter ProjectDateFilter) (ProjectInventory, error)
 	ListProjectRules(ctx context.Context, machine string) (ProjectRules, error)
 	ListArchiveWorktreeCandidates(
 		ctx context.Context, request ArchiveWorktreeCandidateRequest,

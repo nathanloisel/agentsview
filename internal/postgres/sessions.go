@@ -44,7 +44,7 @@ type Store struct {
 
 // pgSessionBaseCols is the column list for PG session queries that do not
 // expose source paths.
-const pgSessionBaseCols = `id, project, machine, agent,
+const pgSessionBaseCols = `id, project, project_assigned, machine, agent,
 	agent_label, entrypoint, session_kind,
 	first_message, COALESCE(display_name, session_name) AS display_name, created_at, started_at,
 	ended_at, message_count, user_message_count,
@@ -214,7 +214,7 @@ func scanPGSessionWithSource(
 	var createdAt *time.Time
 	var startedAt, endedAt, deletedAt *time.Time
 	targets := []any{
-		&s.ID, &s.Project, &s.Machine, &s.Agent,
+		&s.ID, &s.Project, &s.ProjectAssigned, &s.Machine, &s.Agent,
 		&s.AgentLabel, &s.Entrypoint, &s.SessionKind,
 		&s.FirstMessage, &s.DisplayName,
 		&createdAt, &startedAt, &endedAt,
@@ -556,6 +556,7 @@ func (s *Store) GetSidebarSessionIndex(
 			parent_session_id,
 			relationship_type,
 			project,
+			project_assigned,
 			machine,
 			agent,
 			agent_label,
@@ -796,6 +797,7 @@ func (s *Store) getSidebarSessionIndexPage(
 			s.parent_session_id,
 			s.relationship_type,
 			s.project,
+			s.project_assigned,
 			s.machine,
 			s.agent,
 			s.agent_label,
@@ -844,6 +846,7 @@ func scanPGSidebarSessionIndexRows(
 			&row.ParentSessionID,
 			&row.RelationshipType,
 			&row.Project,
+			&row.ProjectAssigned,
 			&row.Machine,
 			&row.Agent,
 			&row.AgentLabel,
@@ -910,7 +913,7 @@ func (s *Store) GetSession(
 
 // FindSessionIDsByRawSuffix returns up to limit session IDs whose
 // stored id is either the exact raw input or the raw input preceded
-// by an agent prefix. The suffix comparison is literal and results
+// by an agent or host prefix. The suffix comparison is literal and results
 // match SQLite ordering: exact match first, then most recent session.
 func (s *Store) FindSessionIDsByRawSuffix(
 	ctx context.Context, raw string, limit int,
@@ -924,7 +927,7 @@ func (s *Store) FindSessionIDsByRawSuffix(
 	rows, err := s.pg.QueryContext(ctx,
 		`SELECT id FROM sessions
 		 WHERE (id = $1
-		        OR RIGHT(id, LENGTH($1) + 1) = ':' || $1)
+		        OR RIGHT(id, LENGTH($1) + 1) IN (':' || $1, '~' || $1))
 		   AND deleted_at IS NULL
 		 ORDER BY (id = $1) DESC,
 		          COALESCE(ended_at, started_at, created_at) DESC

@@ -24,6 +24,7 @@ describe("KNOWN_AGENTS", () => {
       "opencodereview",
       "kilo",
       "kilo-legacy",
+      "cline",
       "openhands",
       "cursor",
       "cursor-ide",
@@ -61,6 +62,7 @@ describe("KNOWN_AGENTS", () => {
       "omnigent",
       "codebuff",
       "freebuff",
+      "crush",
     ]);
   });
 
@@ -101,6 +103,8 @@ describe("agentColor", () => {
     expect(agentColor("piebald")).toBe("var(--accent-orange)");
     expect(agentColor("roocode")).toBe("var(--accent-rose)");
     expect(agentColor("omnigent")).toBe("var(--accent-teal)");
+    expect(agentColor("cline")).toBe("var(--accent-violet)");
+    expect(agentColor("crush")).toBe("var(--accent-coral)");
   });
 
   it("falls back to blue for unknown agents", () => {
@@ -172,6 +176,7 @@ describe("agentLabel", () => {
     expect(agentLabel("omnigent")).toBe("Omnigent");
     expect(agentLabel("traex")).toBe("TraeX");
     expect(agentLabel("opencodereview")).toBe("Open Code Review");
+    expect(agentLabel("crush")).toBe("Charm Crush");
   });
 
   it("capitalizes simple agent names", () => {

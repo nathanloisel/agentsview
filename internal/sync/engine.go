@@ -4693,6 +4693,43 @@ func (e *Engine) ApplyWorktreeProjectMappings(
 	return result, err
 }
 
+// AssignSessionProject serializes a one-session project override with parser
+// and watcher writes, then publishes the changed session inventory.
+func (e *Engine) AssignSessionProject(
+	ctx context.Context,
+	sessionID string,
+	project string,
+) (db.SessionProjectAssignment, error) {
+	var assignment db.SessionProjectAssignment
+	err := e.RunExclusive(func() error {
+		var err error
+		assignment, err = e.db.AssignSessionProject(ctx, sessionID, project)
+		return err
+	})
+	if err == nil {
+		e.emit("sessions")
+	}
+	return assignment, err
+}
+
+// ClearSessionProjectAssignment serializes removal of a one-session override
+// with parser and watcher writes, then publishes the changed session inventory.
+func (e *Engine) ClearSessionProjectAssignment(
+	ctx context.Context,
+	sessionID string,
+) (db.ClearedSessionProjectAssignment, error) {
+	var cleared db.ClearedSessionProjectAssignment
+	err := e.RunExclusive(func() error {
+		var err error
+		cleared, err = e.db.ClearSessionProjectAssignment(ctx, sessionID)
+		return err
+	})
+	if err == nil {
+		e.emit("sessions")
+	}
+	return cleared, err
+}
+
 // SyncAll discovers and syncs all session files from all agents.
 func (e *Engine) SyncAll(
 	ctx context.Context, onProgress ProgressFunc,
@@ -6707,17 +6744,59 @@ func (e *Engine) tombstoneMissingWatchSourcesLocked(
 				"%s provider reconciliation scopes: %w", plan.agent, plan.err,
 			)
 		}
+		var provider parser.Provider
+		if factory := e.providerFactories[plan.agent]; factory != nil {
+			provider = factory.NewProvider(parser.ProviderConfig{
+				Roots:          e.agentDirs[plan.agent],
+				Machine:        e.machine,
+				SourceMachines: e.sourceMachines[plan.agent],
+				PathRewriter:   e.pathRewriter,
+			})
+		}
 		for _, scope := range plan.plan.Scopes {
+			proofScopes := scope.PhysicalProofScopes
+			if resolver, ok := provider.(parser.StoredSourceHintScopeProvider); ok {
+				var hintScopes []parser.StoredSourceHintScope
+				for _, retryRoot := range scope.RetryRoots {
+					hintScopes = append(
+						hintScopes,
+						resolver.StoredSourceHintScopes(parser.ChangedPathRequest{
+							Path: retryRoot,
+						})...,
+					)
+				}
+				if len(hintScopes) > 0 {
+					proofScopes = deduplicateStoredSourceHintScopes(hintScopes)
+				}
+			}
 			scopes = append(scopes, reconciliationProviderScope{
 				agent:                      plan.agent,
 				roots:                      scope.RetryRoots,
-				proofScopes:                scope.PhysicalProofScopes,
+				proofScopes:                proofScopes,
 				coverageIdentities:         scope.CoverageIdentities,
 				requiredCoverageIdentities: plan.plan.RequiredCoverageIdentities,
 			})
 		}
 	}
 	return e.tombstoneMissingWatchSourceScopesLocked(ctx, scopes, spool)
+}
+
+func deduplicateStoredSourceHintScopes(
+	scopes []parser.StoredSourceHintScope,
+) []parser.StoredSourceHintScope {
+	if len(scopes) <= 1 {
+		return scopes
+	}
+	seen := make(map[parser.StoredSourceHintScope]struct{}, len(scopes))
+	out := make([]parser.StoredSourceHintScope, 0, len(scopes))
+	for _, scope := range scopes {
+		if _, ok := seen[scope]; ok {
+			continue
+		}
+		seen[scope] = struct{}{}
+		out = append(out, scope)
+	}
+	return out
 }
 
 // reconciliationCoverageComplete reports whether the scopes completed for one
@@ -6797,6 +6876,11 @@ func (e *Engine) tombstoneMissingWatchSourceScopesLocked(
 				PathRewriter:   e.pathRewriter,
 			})
 		}
+		if provider != nil &&
+			provider.Capabilities().Source.ExplicitDeletionOnly ==
+				parser.CapabilitySupported {
+			continue
+		}
 		for _, scope := range agentScopes {
 			ownershipScopes := storedSourceDBHintScopes(scope.proofScopes)
 			if len(ownershipScopes) == 0 {
@@ -6871,6 +6955,15 @@ func (e *Engine) tombstoneMissingWatchSourceScopesLocked(
 						if !ok {
 							_, statErr := e.lstatSource(statPath)
 							missing = os.IsNotExist(statErr)
+							if !missing && agent == parser.AgentCline {
+								dir := filepath.Dir(statPath)
+								sessionID := filepath.Base(dir)
+								metaPath := filepath.Join(dir, sessionID+".json")
+								if metaPath != statPath {
+									_, metaErr := e.lstatSource(metaPath)
+									missing = os.IsNotExist(metaErr)
+								}
+							}
 							missingByPath[statPath] = missing
 						}
 						if !missing {
@@ -7774,7 +7867,7 @@ func (e *Engine) syncAllLocked(
 	// through the provider facade in the file-sync phase above, so no
 	// dedicated DB-backed sync pass is needed here.
 
-	// Sync Warp, Forge, Piebald, ZCode, and Goose sessions. These are
+	// Sync Warp, Forge, Piebald, ZCode, Goose, and Crush sessions. These are
 	// provider-authoritative DB-backed providers: a shared SQLite DB hosts every
 	// session, so the provider facade enumerates sources and parses only the
 	// changed ones.
@@ -7823,9 +7916,18 @@ func (e *Engine) syncAllLocked(
 			return stats
 		}
 	}
+	if scope.includesAny(e.agentDirs[parser.AgentCrush]) {
+		if e.syncProviderDBBackedAgent(
+			ctx, parser.AgentCrush, "crush",
+			writeMode, verbose, scope, &stats, advanceDBProgress,
+		) {
+			stats.Aborted = true
+			return stats
+		}
+	}
 	// Link subagent child sessions to their parents after all DB-backed
-	// agent writes (including provider-authoritative Forge, Goose, Piebald,
-	// and ZCode).
+	// agent writes (including provider-authoritative Crush, Forge, Goose,
+	// Piebald, and ZCode).
 	// LinkSubagentSessions is idempotent — its WHERE filter and partial index
 	// make it a cheap no-op when nothing new was written — so no guard is
 	// needed.
@@ -8578,6 +8680,14 @@ func (e *Engine) discoveredFileEffectiveMtime(
 			return 0, err
 		}
 		_, mtime := roocodeEffectiveStat(file.Path, info)
+		return mtime, nil
+	}
+	if file.Agent == parser.AgentCline {
+		info, err := os.Stat(file.Path)
+		if err != nil {
+			return 0, err
+		}
+		_, mtime := clineEffectiveStat(file.Path, info)
 		return mtime, nil
 	}
 	// Kilo Legacy is excluded from the provider-Fingerprint path for
@@ -9438,7 +9548,7 @@ func (e *Engine) providerDBBackedSourceFresh(
 }
 
 // syncProviderDBBackedAgent runs the full-sync phase for a provider-authoritative
-// DB-backed agent (Forge, Goose, Piebald, Warp, ZCode). It mirrors
+// DB-backed agent (Crush, Forge, Goose, Piebald, Warp, ZCode). It mirrors
 // syncOpenCodeFormatAgent:
 // only changed sessions are parsed (so the second sync of unchanged data is a
 // no-op), and the per-session write semantics match the legacy DB sync.
@@ -11768,7 +11878,12 @@ func (e *Engine) processProviderFile(
 	// engine). For Codex this also folds in the session_index.jsonl sidecar:
 	// a shared index mtime bump that did not change this session's title must
 	// not trigger a reparse.
-	if !forceSourceCwdParse && !incForceReplace && !e.forceParseRequested(file) {
+	// A rejected checkpoint forbids resuming from its cursor, but does not
+	// invalidate a matching full-source hash. In particular, device numbers
+	// can change across boots without changing the transcript.
+	// A fingerprint awaiting its parse-derived hash cannot prove freshness.
+	if !forceSourceCwdParse && !e.forceParseRequested(file) &&
+		(!incForceReplace || codexForceFullParse && fingerprint.Hash != "") {
 		dbFresh, metadataVerified := e.providerSourceFreshnessByDB(
 			file, fingerprint, providerSemantics,
 		)
@@ -12076,6 +12191,7 @@ func (e *Engine) processProviderFile(
 	// presence sweep. It never filters unchanged results or writes tombstones,
 	// so ownership reconciliation is needed only by real sync engines.
 	if (file.Agent == parser.AgentKiro ||
+		file.Agent == parser.AgentCline ||
 		(file.Agent == parser.AgentOmnigent && outcome.ForceReplace) ||
 		(file.Agent == parser.AgentCursorIDE && outcome.ForceReplace) ||
 		(file.Agent == parser.AgentTrae && !e.forceParse)) &&
@@ -12950,11 +13066,26 @@ func (e *Engine) applyProviderFilePathPolicies(
 	for _, id := range e.applyIDPrefixToSessionIDs(res.excludedSessionIDs) {
 		excluded[id] = struct{}{}
 	}
+	// Source-missing ownership takes precedence over parser-exclusion cleanup
+	// for Cline: a stored session whose member file vanished from a present
+	// session directory must be tombstoned by the complete-result ownership
+	// arm, never hard-deleted as a stale-row sibling.
+	sourceMissing := make(map[string]struct{})
+	if agent == parser.AgentCline {
+		for _, member := range res.sourceMissingMembers {
+			if id := applyIDPrefixToID(e.idPrefix, member.sessionID); id != "" {
+				sourceMissing[id] = struct{}{}
+			}
+		}
+	}
 	addExclusion := func(id string) {
 		if id == "" {
 			return
 		}
 		if _, ok := excluded[id]; ok {
+			return
+		}
+		if _, ok := sourceMissing[id]; ok {
 			return
 		}
 		excluded[id] = struct{}{}
@@ -13578,7 +13709,7 @@ func (e *Engine) providerSkipCacheEntryFreshInDB(
 func processFileUsesProvider(agent parser.AgentType) bool {
 	switch agent {
 	case parser.AgentForge, parser.AgentGoose, parser.AgentPiebald,
-		parser.AgentWarp, parser.AgentZCode:
+		parser.AgentWarp, parser.AgentZCode, parser.AgentCrush:
 		return true
 	default:
 		return false
@@ -13631,7 +13762,8 @@ func (e *Engine) shouldSkipProviderSource(
 
 func providerSourceSupportsPersistedFreshness(agent parser.AgentType) bool {
 	switch agent {
-	case parser.AgentForge, parser.AgentGoose, parser.AgentWarp, parser.AgentZCode:
+	case parser.AgentForge, parser.AgentGoose, parser.AgentWarp, parser.AgentZCode,
+		parser.AgentCrush:
 		return true
 	default:
 		return false
@@ -14690,6 +14822,15 @@ func (e *Engine) providerSourceFreshBeforeFingerprint(
 		// still changes the composite and falls through to the full
 		// fingerprint.
 		size, mtime := roocodeEffectiveStat(path, info)
+		effectiveInfo := fakeSnapshotInfo{
+			fSize:  size,
+			fMtime: mtime,
+		}
+		if e.shouldSkipByPath(path, effectiveInfo) {
+			return mtime, true
+		}
+	case parser.AgentCline:
+		size, mtime := clineEffectiveStat(path, info)
 		effectiveInfo := fakeSnapshotInfo{
 			fSize:  size,
 			fMtime: mtime,
@@ -15843,6 +15984,43 @@ func roocodeEffectiveStat(historyPath string, info os.FileInfo) (int64, int64) {
 		size += msgInfo.Size()
 		if ts := msgInfo.ModTime().UnixNano(); ts > mtime {
 			mtime = ts
+		}
+	}
+	return size, mtime
+}
+
+// clineEffectiveStat returns the composite size and latest mtime of
+// a Cline session's <id>.json, its <id>.messages.json sibling, and any
+// teammate *.messages.json files using stat calls only. The values mirror
+// what clineFingerprintSource stamps on stored sessions (summed size, max mtime).
+func clineEffectiveStat(metaPath string, info os.FileInfo) (int64, int64) {
+	size := info.Size()
+	mtime := info.ModTime().UnixNano()
+	dir := filepath.Dir(metaPath)
+	sessionID := filepath.Base(dir)
+	msgPath := filepath.Join(dir, sessionID+".messages.json")
+	if msgInfo, err := os.Lstat(msgPath); err == nil && msgInfo.Mode().IsRegular() {
+		size += msgInfo.Size()
+		if ts := msgInfo.ModTime().UnixNano(); ts > mtime {
+			mtime = ts
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if parser.IsClineTeammateMessagesFile(sessionID, name) {
+				teammatePath := filepath.Join(dir, name)
+				if tInfo, err := os.Lstat(teammatePath); err == nil && tInfo.Mode().IsRegular() {
+					size += tInfo.Size()
+					if ts := tInfo.ModTime().UnixNano(); ts > mtime {
+						mtime = ts
+					}
+				}
+			}
 		}
 	}
 	return size, mtime
@@ -18769,6 +18947,7 @@ func shouldReplaceFullParseMessages(
 		// messages, and strips embedded read results into them. An
 		// append would leave the existing rows' result events stale.
 		pw.sess.Agent == parser.AgentRooCode ||
+		pw.sess.Agent == parser.AgentCline ||
 		// Kilo Legacy pairs later command_output, MCP response,
 		// and error records back to earlier tool-call messages,
 		// similar to RooCode. An incremental append would leave
@@ -19216,7 +19395,7 @@ func (e *Engine) writeSessionFullWithResolver(
 func (e *Engine) shouldPreserveRooCodeArchive(
 	agent parser.AgentType, sessionID string, msgs []db.Message,
 ) bool {
-	if (agent != parser.AgentRooCode && agent != parser.AgentKiloLegacy) || len(msgs) > 0 {
+	if (agent != parser.AgentRooCode && agent != parser.AgentKiloLegacy && agent != parser.AgentCline) || len(msgs) > 0 {
 		return false
 	}
 	store := e.archiveStore
@@ -19975,8 +20154,8 @@ func (e *Engine) FindSourceFile(sessionID string) string {
 	}
 	rawSessionID := strings.TrimPrefix(rawID, def.IDPrefix)
 	if !def.FileBased {
-		// Forge, Piebald, Warp, and ZCode are DB-backed providers that own
-		// discovery and source lookup through the provider facade. Their
+		// Crush, Forge, Piebald, Warp, and ZCode are DB-backed providers that
+		// own discovery and source lookup through the provider facade. Their
 		// virtual <db>#<sessionID> path is resolved by findProviderSourceFile
 		// below. Non-provider, non-file-based agents (e.g. remote imports)
 		// have no local source file.
@@ -20264,8 +20443,8 @@ func (e *Engine) SourceMtime(sessionID string) int64 {
 	}
 	rawSessionID := strings.TrimPrefix(rawID, def.IDPrefix)
 	if !def.FileBased {
-		// Forge, Piebald, Warp, and ZCode are DB-backed providers: their
-		// per-session source mtime comes from the provider fingerprint
+		// Crush, Forge, Piebald, Warp, and ZCode are DB-backed providers:
+		// their per-session source mtime comes from the provider fingerprint
 		// (which mirrors the legacy List*SessionMeta last-modified value).
 		// Non-provider, non-file-based agents have no local source.
 		if e.isProviderAuthoritative(def.Type) {
@@ -20332,6 +20511,14 @@ func (e *Engine) SourceMtime(sessionID string) int64 {
 			return 0
 		}
 		_, mtime := roocodeEffectiveStat(path, info)
+		return mtime
+	}
+	if def.Type == parser.AgentCline {
+		info, err := os.Stat(path)
+		if err != nil {
+			return 0
+		}
+		_, mtime := clineEffectiveStat(path, info)
 		return mtime
 	}
 	if def.Type == parser.AgentCodebuff {
@@ -20558,11 +20745,11 @@ func (e *Engine) SyncSingleSessionContext(
 		return fmt.Errorf("unknown agent for session %s", sessionID)
 	}
 	if !def.FileBased {
-		// Forge, Piebald, Warp, and ZCode are DB-backed providers: re-sync routes
-		// through FindSourceFile (resolving the virtual <db>#<sessionID>
-		// path) plus the provider-aware processFile path below, mirroring
-		// the file-based agents. Other non-file-based agents use the
-		// OpenCode-format storage path.
+		// Crush, Forge, Piebald, Warp, and ZCode are DB-backed providers:
+		// re-sync routes through FindSourceFile (resolving the virtual
+		// <db>#<sessionID> path) plus the provider-aware processFile path
+		// below, mirroring the file-based agents. Other non-file-based
+		// agents use the OpenCode-format storage path.
 		if !e.isProviderAuthoritative(def.Type) {
 			return fmt.Errorf(
 				"cannot resync non-file-based session %s for agent %s",

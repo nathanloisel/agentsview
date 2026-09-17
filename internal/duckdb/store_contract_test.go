@@ -83,6 +83,8 @@ func TestClaudeProvenanceRoundTrip(t *testing.T) {
 		MessageCount:     1,
 		UserMessageCount: 1,
 	}), "upsert identity session")
+	_, err := local.AssignSessionProject(ctx, "duck-identity", "duck_identity")
+	require.NoError(t, err, "assign identity session project")
 	require.NoError(t, local.InsertMessages([]db.Message{{
 		SessionID:     "duck-identity",
 		Ordinal:       0,
@@ -94,12 +96,12 @@ func TestClaudeProvenanceRoundTrip(t *testing.T) {
 
 	syncer := newInMemoryTestSync(t, local, SyncOptions{})
 	require.NoError(t, createSchema(ctx, syncer.DB()))
-	_, err := syncer.pushEverything(ctx, nil)
+	_, err = syncer.pushEverything(ctx, nil)
 	require.NoError(t, err, "push to DuckDB")
 	store := NewStoreFromDB(syncer.DB())
 
 	index, err := store.GetSidebarSessionIndex(ctx, db.SessionFilter{
-		Project: "duck-identity",
+		Project: "duck_identity",
 	})
 	require.NoError(t, err)
 	require.Len(t, index.Sessions, 1)
@@ -107,6 +109,7 @@ func TestClaudeProvenanceRoundTrip(t *testing.T) {
 	assert.Equal(t, "Claude Triage", index.Sessions[0].AgentLabel)
 	assert.Equal(t, "sdk-cli", index.Sessions[0].Entrypoint)
 	assert.Equal(t, "bg", index.Sessions[0].SessionKind)
+	assert.True(t, index.Sessions[0].ProjectAssigned)
 	require.NotNil(t, index.Sessions[0].DisplayName)
 	assert.Equal(t, "Agent Title", *index.Sessions[0].DisplayName)
 
@@ -302,6 +305,52 @@ func TestDuckDBFindSessionIDsByPartialLiteralCaseSensitive(t *testing.T) {
 	require.NoError(t, err, "case-sensitive lookup")
 	assert.ElementsMatch(t, []string{"abc_def", "abcXdef", "abc%def"}, got)
 	assert.NotContains(t, got, "ABCdef")
+}
+
+func TestDuckDBFindSessionIDsByRawSuffix(t *testing.T) {
+	ctx := context.Background()
+	local := newLocalDB(t)
+	for _, id := range []string{
+		"plain-id", "codex:uuid", "host~uuid", "host~uuid-fork",
+		"host~P-E", "host~wild_%_literal", "host~trashed",
+	} {
+		require.NoError(t, local.UpsertSession(db.Session{
+			ID: id, Project: "proj", Machine: "test",
+			Agent: "claude", MessageCount: 1,
+		}), "upsert %q", id)
+	}
+	require.NoError(t, local.SoftDeleteSession("host~trashed"))
+
+	syncer := newInMemoryTestSync(t, local, SyncOptions{})
+	require.NoError(t, createSchema(ctx, syncer.DB()))
+	_, err := syncer.pushEverything(ctx, nil)
+	require.NoError(t, err)
+	store := NewStoreFromDB(syncer.DB())
+
+	got, err := store.FindSessionIDsByRawSuffix(ctx, "uuid", 2)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"codex:uuid", "host~uuid"}, got)
+	uuidIDs := append([]string(nil), got...)
+
+	got, err = store.FindSessionIDsByRawSuffix(ctx, "plain-id", 2)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"plain-id"}, got)
+	exactIDs := append([]string(nil), got...)
+
+	got, err = store.FindSessionIDsByRawSuffix(ctx, "wild_%_literal", 2)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"host~wild_%_literal"}, got)
+	wildcardIDs := append([]string(nil), got...)
+
+	got, err = store.FindSessionIDsByRawSuffix(ctx, "trashed", 2)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	trashedIDs := append([]string(nil), got...)
+
+	got, err = store.FindSessionIDsByRawSuffix(ctx, "E", 2)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	t.Logf("head: duckdb_uuid=%v exact=%v wildcard=%v trashed=%v entry=%v", uuidIDs, exactIDs, wildcardIDs, trashedIDs, got)
 }
 
 func duckContractSessionsCursorsAndMetadata(
@@ -603,7 +652,7 @@ func duckContractDataInventoryRulesCandidates(
 	t.Helper()
 	ctx := context.Background()
 
-	inventory, err := store.GetProjectInventory(ctx)
+	inventory, err := store.GetProjectInventory(ctx, db.ProjectDateFilter{})
 	require.NoError(t, err)
 	assert.Equal(t, 2, inventory.TotalProjects)
 	assert.Equal(t, 2, inventory.TotalSessions)

@@ -1160,6 +1160,8 @@ func providerFactoryForDef(def AgentDef) ProviderFactory {
 		return newImportOnlyProviderFactory(def)
 	case AgentCommandCode:
 		return newCommandCodeProviderFactory(def)
+	case AgentCrush:
+		return newCrushProviderFactory(def)
 	case AgentCodex:
 		return newCodexProviderFactory(def)
 	case AgentTraeX:
@@ -1276,6 +1278,8 @@ func providerFactoryForDef(def AgentDef) ProviderFactory {
 		return newZedProviderFactory(def)
 	case AgentRooCode:
 		return newRooCodeProviderFactory(def)
+	case AgentCline:
+		return newClineProviderFactory(def)
 	case AgentCodebuff:
 		return newCodebuffProviderFactory(def)
 	default:

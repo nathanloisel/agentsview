@@ -276,7 +276,7 @@ func (s *Store) IngestEvalTrajectory(
 	return db.EvalTrajectoryIngestResult{}, db.ErrReadOnly
 }
 
-const duckSessionCols = `id, project, machine, agent,
+const duckSessionCols = `id, project, project_assigned, machine, agent,
 	agent_label, entrypoint, session_kind,
 	first_message, COALESCE(display_name, session_name) AS display_name, created_at, started_at,
 	ended_at, message_count, user_message_count,
@@ -313,7 +313,7 @@ func scanSessionWithSource(
 	var createdAt any
 	var startedAt, endedAt, deletedAt any
 	targets := []any{
-		&s.ID, &s.Project, &s.Machine, &s.Agent,
+		&s.ID, &s.Project, &s.ProjectAssigned, &s.Machine, &s.Agent,
 		&s.AgentLabel, &s.Entrypoint, &s.SessionKind,
 		&s.FirstMessage, &s.DisplayName,
 		&createdAt, &startedAt, &endedAt,
@@ -412,6 +412,52 @@ func (s *Store) FindSessionIDsByPartial(
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// FindSessionIDsByRawSuffix returns IDs that equal raw or end with a
+// literal colon/tilde delimiter followed by raw.
+func (s *Store) FindSessionIDsByRawSuffix(
+	ctx context.Context, raw string, limit int,
+) ([]string, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	rows, err := s.queryContext(ctx,
+		`SELECT id FROM sessions
+		 WHERE (id = ?
+		        OR RIGHT(id, LENGTH(?) + 1) IN (':' || ?, '~' || ?))
+		   AND deleted_at IS NULL
+		 ORDER BY (id = ?) DESC,
+		          COALESCE(ended_at, started_at, created_at) DESC
+		 LIMIT ?`,
+		raw, raw, raw, raw, raw, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"finding duckdb sessions by raw suffix %q: %w",
+			raw, err,
+		)
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf(
+				"scanning duckdb session id: %w", err,
+			)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf(
+			"iterating duckdb raw suffix session ids: %w", err,
+		)
+	}
+	return ids, nil
 }
 
 func formatDBTime(v any) string {
@@ -572,6 +618,7 @@ func (s *Store) GetSidebarSessionIndex(ctx context.Context, f db.SessionFilter) 
 			parent_session_id,
 			relationship_type,
 			project,
+			project_assigned,
 			machine,
 			agent,
 			agent_label,
@@ -612,6 +659,7 @@ func (s *Store) GetSidebarSessionIndex(ctx context.Context, f db.SessionFilter) 
 			&row.ParentSessionID,
 			&row.RelationshipType,
 			&row.Project,
+			&row.ProjectAssigned,
 			&row.Machine,
 			&row.Agent,
 			&row.AgentLabel,

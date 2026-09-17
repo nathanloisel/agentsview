@@ -218,7 +218,7 @@ func (s *mcpDaemonService) daemonService(
 		)
 	}
 	s.cfg.AuthToken = cfg.AuthToken
-	return service.NewHTTPBackend(tr.URL, cfg.AuthToken, tr.ReadOnly), nil
+	return service.NewHTTPBackend(tr.URL, cfg.AuthToken, tr.ReadOnly, tr.BrowserURL), nil
 }
 
 func (s *mcpDaemonService) Get(
@@ -239,6 +239,16 @@ func (s *mcpDaemonService) FindSessionIDsByPartial(
 		return nil, err
 	}
 	return svc.FindSessionIDsByPartial(ctx, partial, limit)
+}
+
+func (s *mcpDaemonService) FindSessionIDsByRawSuffix(
+	ctx context.Context, raw string, limit int,
+) ([]string, error) {
+	svc, err := s.daemonService(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return svc.FindSessionIDsByRawSuffix(ctx, raw, limit)
 }
 
 func (s *mcpDaemonService) List(
